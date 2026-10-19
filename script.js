@@ -389,50 +389,59 @@ export class IngestionEngine {
 
   // ---------- MARKDOWN PIPELINE ----------
   // Protect code from the math pass, render math to placeholders so marked can't mangle it.
-  function protectMath(src) {
-    const codes = [],
-      maths = [];
-    let t = src.replace(/^(```|~~~)[^\n]*\n[\s\S]*?^\1[ \t]*$/gm, (m) => {
-      codes.push(m);
-      return `MSCODE${codes.length - 1}END`;
-    });
-    t = t.replace(/`[^`\n]+`/g, (m) => {
-      codes.push(m);
-      return `MSCODE${codes.length - 1}END`;
-    });
+   function protectMath(src) {
+     const codes = [],
+       maths = [];
 
-    const stash = (formula, display) => {
-      let html;
-      if (typeof katex === "undefined") html = `<code>${esc(formula)}</code>`;
-      else {
-        try {
-          html = katex.renderToString(formula.trim(), {
-            displayMode: display,
-            throwOnError: false,
-          });
-        } catch (e) {
-          html = `<span class="mermaid-error">${esc(e.message)}</span>`;
-        }
-      }
-      if (display) html = `<div class="math-block">${html}</div>`;
-      maths.push(html);
-      return `MSMATH${maths.length - 1}END`;
-    };
-    t = t.replace(/\$\$([\s\S]+?)\$\$/g, (m, f) => stash(f, true));
-    t = t.replace(
-      /(?<![\\$])\$(?![\s$])([^$\n]+?)(?<![\s\\])\$(?!\d)/g,
-      (m, f) => stash(f, false),
-    );
-    t = t.replace(/MSCODE(\d+)END/g, (m, i) => codes[i]);
+     // Pandoc exports wrap raw TeX as `\sum`{=tex}; unwrap so it isn't treated as inline code
+     src = src.replace(/`([^`\n]*)`\{=tex\}/g, "$1");
 
-    return {
-      text: t,
-      restore: (html) =>
-        html
-          .replace(/<p>\s*MSMATH(\d+)END\s*<\/p>/g, (m, i) => maths[i])
-          .replace(/MSMATH(\d+)END/g, (m, i) => maths[i]),
-    };
-  }
+     let t = src.replace(/^(```|~~~)[^\n]*\n[\s\S]*?^\1[ \t]*$/gm, (m) => {
+       codes.push(m);
+       return `MSCODE${codes.length - 1}END`;
+     });
+     t = t.replace(/`[^`\n]+`/g, (m) => {
+       codes.push(m);
+       return `MSCODE${codes.length - 1}END`;
+     });
+
+     const stash = (formula, display) => {
+       let html;
+       formula = formula.replace(/\\_/g, "_");
+       if (typeof katex === "undefined") html = `<code>${esc(formula)}</code>`;
+       else {
+         try {
+           html = katex.renderToString(formula.trim(), {
+             displayMode: display,
+             throwOnError: false,
+           });
+         } catch (e) {
+           html = `<span class="mermaid-error">${esc(e.message)}</span>`;
+         }
+       }
+       if (display) html = `<div class="math-block">${html}</div>`;
+       maths.push(html);
+       return `MSMATH${maths.length - 1}END`;
+     };
+
+     // Order matters: bracket delimiters first, then $$, then inline $
+     t = t.replace(/\\\[([\s\S]+?)\\\]/g, (m, f) => stash(f, true));
+     t = t.replace(/\\\(([\s\S]+?)\\\)/g, (m, f) => stash(f, false));
+     t = t.replace(/\$\$([\s\S]+?)\$\$/g, (m, f) => stash(f, true));
+     t = t.replace(
+       /(?<![\\$])\$(?![\s$])([^$\n]+?)(?<![\s\\])\$(?!\d)/g,
+       (m, f) => stash(f, false),
+     );
+     t = t.replace(/MSCODE(\d+)END/g, (m, i) => codes[i]);
+
+     return {
+       text: t,
+       restore: (html) =>
+         html
+           .replace(/<p>\s*MSMATH(\d+)END\s*<\/p>/g, (m, i) => maths[i])
+           .replace(/MSMATH(\d+)END/g, (m, i) => maths[i]),
+     };
+   }
 
   const CALLOUTS = {
     note: "Note",
