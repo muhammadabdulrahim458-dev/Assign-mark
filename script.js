@@ -168,11 +168,8 @@ export class IngestionEngine {
 
   // ---------- CONFIG ----------
   const DEFAULT_CONFIG = {
-    // bodyFont: "Inter, sans-serif",
     bodyFont: "'Times New Roman', Times, serif",
     headingFont: "'Times New Roman', Times, serif",
-
-    // headingFont: "Lexend, sans-serif",
     codeFont: "'Fira Code', monospace",
     fontSize: 14,
     lineHeight: 1.6,
@@ -389,59 +386,59 @@ export class IngestionEngine {
 
   // ---------- MARKDOWN PIPELINE ----------
   // Protect code from the math pass, render math to placeholders so marked can't mangle it.
-   function protectMath(src) {
-     const codes = [],
-       maths = [];
+  function protectMath(src) {
+    const codes = [],
+      maths = [];
 
-     // Pandoc exports wrap raw TeX as `\sum`{=tex}; unwrap so it isn't treated as inline code
-     src = src.replace(/`([^`\n]*)`\{=tex\}/g, "$1");
+    // Pandoc exports wrap raw TeX as `\sum`{=tex}; unwrap so it isn't treated as inline code
+    src = src.replace(/`([^`\n]*)`\{=tex\}/g, "$1");
 
-     let t = src.replace(/^(```|~~~)[^\n]*\n[\s\S]*?^\1[ \t]*$/gm, (m) => {
-       codes.push(m);
-       return `MSCODE${codes.length - 1}END`;
-     });
-     t = t.replace(/`[^`\n]+`/g, (m) => {
-       codes.push(m);
-       return `MSCODE${codes.length - 1}END`;
-     });
+    let t = src.replace(/^(```|~~~)[^\n]*\n[\s\S]*?^\1[ \t]*$/gm, (m) => {
+      codes.push(m);
+      return `MSCODE${codes.length - 1}END`;
+    });
+    t = t.replace(/`[^`\n]+`/g, (m) => {
+      codes.push(m);
+      return `MSCODE${codes.length - 1}END`;
+    });
 
-     const stash = (formula, display) => {
-       let html;
-       formula = formula.replace(/\\_/g, "_");
-       if (typeof katex === "undefined") html = `<code>${esc(formula)}</code>`;
-       else {
-         try {
-           html = katex.renderToString(formula.trim(), {
-             displayMode: display,
-             throwOnError: false,
-           });
-         } catch (e) {
-           html = `<span class="mermaid-error">${esc(e.message)}</span>`;
-         }
-       }
-       if (display) html = `<div class="math-block">${html}</div>`;
-       maths.push(html);
-       return `MSMATH${maths.length - 1}END`;
-     };
+    const stash = (formula, display) => {
+      let html;
+      formula = formula.replace(/\\_/g, "_");
+      if (typeof katex === "undefined") html = `<code>${esc(formula)}</code>`;
+      else {
+        try {
+          html = katex.renderToString(formula.trim(), {
+            displayMode: display,
+            throwOnError: false,
+          });
+        } catch (e) {
+          html = `<span class="mermaid-error">${esc(e.message)}</span>`;
+        }
+      }
+      if (display) html = `<div class="math-block">${html}</div>`;
+      maths.push(html);
+      return `MSMATH${maths.length - 1}END`;
+    };
 
-     // Order matters: bracket delimiters first, then $$, then inline $
-     t = t.replace(/\\\[([\s\S]+?)\\\]/g, (m, f) => stash(f, true));
-     t = t.replace(/\\\(([\s\S]+?)\\\)/g, (m, f) => stash(f, false));
-     t = t.replace(/\$\$([\s\S]+?)\$\$/g, (m, f) => stash(f, true));
-     t = t.replace(
-       /(?<![\\$])\$(?![\s$])([^$\n]+?)(?<![\s\\])\$(?!\d)/g,
-       (m, f) => stash(f, false),
-     );
-     t = t.replace(/MSCODE(\d+)END/g, (m, i) => codes[i]);
+    // Order matters: bracket delimiters first, then $$, then inline $
+    t = t.replace(/\\\[([\s\S]+?)\\\]/g, (m, f) => stash(f, true));
+    t = t.replace(/\\\(([\s\S]+?)\\\)/g, (m, f) => stash(f, false));
+    t = t.replace(/\$\$([\s\S]+?)\$\$/g, (m, f) => stash(f, true));
+    t = t.replace(
+      /(?<![\\$])\$(?![\s$])([^$\n]+?)(?<![\s\\])\$(?!\d)/g,
+      (m, f) => stash(f, false),
+    );
+    t = t.replace(/MSCODE(\d+)END/g, (m, i) => codes[i]);
 
-     return {
-       text: t,
-       restore: (html) =>
-         html
-           .replace(/<p>\s*MSMATH(\d+)END\s*<\/p>/g, (m, i) => maths[i])
-           .replace(/MSMATH(\d+)END/g, (m, i) => maths[i]),
-     };
-   }
+    return {
+      text: t,
+      restore: (html) =>
+        html
+          .replace(/<p>\s*MSMATH(\d+)END\s*<\/p>/g, (m, i) => maths[i])
+          .replace(/MSMATH(\d+)END/g, (m, i) => maths[i]),
+    };
+  }
 
   const CALLOUTS = {
     note: "Note",
@@ -554,6 +551,7 @@ export class IngestionEngine {
     }
     const { text, restore } = protectMath(raw);
     let html;
+    imgOcc = 0; // image counter restarts on every render
     try {
       html = marked.parse(text);
     } catch (e) {
@@ -564,6 +562,7 @@ export class IngestionEngine {
     highlightCode();
     updateStats(raw);
     await renderMermaid(token);
+    refreshImageSelection();
     if (token === renderToken) autosave();
   }
   const scheduleRender = debounce(renderMarkdown, 200);
@@ -717,9 +716,355 @@ export class IngestionEngine {
     el.classList.toggle(mq.matches ? "mobile-open" : "collapsed");
   }
 
+  // ---------- IMAGES ----------
+  const IMG_KEY = "markdownStudio.images.v1";
+  const IMG_RE = /!\[([^\]]*)\]\(img:([a-z0-9]+)(?:\s+"([^"]*)")?\)/g;
+  const CODE_MASK_RE = /^(```|~~~)[^\n]*\n[\s\S]*?^\1[ \t]*$|`[^`\n]+`/gm;
+
+  let imageStore = (() => {
+    try {
+      return JSON.parse(localStorage.getItem(IMG_KEY)) || {};
+    } catch (e) {
+      return {};
+    }
+  })();
+  let imgOcc = 0, // image counter, reset on every render
+    selOcc = -1, // which image occurrence is selected
+    imgBox = null,
+    storageWarned = false;
+
+  const newImageId = () =>
+    Math.random().toString(36).slice(2, 10).padEnd(8, "0");
+
+  function persistImages() {
+    try {
+      localStorage.setItem(IMG_KEY, JSON.stringify(imageStore));
+    } catch (e) {
+      if (!storageWarned) {
+        storageWarned = true;
+        toast(
+          "Browser storage is full: images will not survive a reload. Export your PDF soon.",
+        );
+      }
+    }
+  }
+
+  // Drop stored images that no document references (runs once at startup, so Undo keeps working)
+  function pruneImages(md) {
+    const used = new Set(
+      [...md.matchAll(/\(img:([a-z0-9]+)/g)].map((m) => m[1]),
+    );
+    let changed = false;
+    Object.keys(imageStore).forEach((k) => {
+      if (!used.has(k)) {
+        delete imageStore[k];
+        changed = true;
+      }
+    });
+    if (changed) persistImages();
+  }
+
+  // Convert inline base64 images into short references
+  function migrateInlineImages(md) {
+    let changed = false;
+    const out = md.replace(
+      /!\[([^\]]*)\]\((data:image\/[a-zA-Z0-9+.-]+;base64,[A-Za-z0-9+/=]+)\)/g,
+      (m, alt, data) => {
+        const id = newImageId();
+        imageStore[id] = data;
+        changed = true;
+        return `![${alt}](img:${id})`;
+      },
+    );
+    if (changed) persistImages();
+    return out;
+  }
+
+  const readAsDataURL = (file) =>
+    new Promise((res, rej) => {
+      const r = new FileReader();
+      r.onload = () => res(r.result);
+      r.onerror = rej;
+      r.readAsDataURL(file);
+    });
+
+  // Downscale + compress so localStorage and the PDF stay small
+  async function prepareImage(file) {
+    const raw = await readAsDataURL(file);
+    if (file.type === "image/svg+xml" || file.type === "image/gif") return raw;
+    const img = await new Promise((res, rej) => {
+      const i = new Image();
+      i.onload = () => res(i);
+      i.onerror = rej;
+      i.src = raw;
+    });
+    const MAX = 1600;
+    const scale = Math.min(
+      1,
+      MAX / Math.max(img.naturalWidth, img.naturalHeight),
+    );
+    if (scale === 1 && file.size < 400 * 1024) return raw;
+
+    const cv = document.createElement("canvas");
+    cv.width = Math.round(img.naturalWidth * scale);
+    cv.height = Math.round(img.naturalHeight * scale);
+    const ctx = cv.getContext("2d");
+    if (file.type === "image/png") {
+      ctx.drawImage(img, 0, 0, cv.width, cv.height);
+      const png = cv.toDataURL("image/png");
+      if (png.length < 800000) return png; // keep transparency when small enough
+    }
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, cv.width, cv.height);
+    ctx.drawImage(img, 0, 0, cv.width, cv.height);
+    return cv.toDataURL("image/jpeg", 0.88);
+  }
+
+  async function insertImages(files) {
+    const parts = [];
+    for (const f of files) {
+      try {
+        const id = newImageId();
+        imageStore[id] = await prepareImage(f);
+        const alt =
+          (/^image\.\w+$/i.test(f.name)
+            ? "Image"
+            : f.name.replace(/\.[^.]+$/, "")
+          )
+            .replace(/[\[\]\n]/g, " ")
+            .trim() || "Image";
+        parts.push(`![${alt}](img:${id})`);
+      } catch (e) {
+        toast("Could not read image: " + f.name);
+      }
+    }
+    if (!parts.length) return;
+    persistImages();
+    const ta = els.textarea,
+      before = ta.value.slice(0, ta.selectionStart);
+    const prefix =
+      !before || before.endsWith("\n\n")
+        ? ""
+        : before.endsWith("\n")
+          ? "\n"
+          : "\n\n";
+    ta.setRangeText(
+      prefix + parts.join("\n\n") + "\n\n",
+      ta.selectionStart,
+      ta.selectionEnd,
+      "end",
+    );
+    renderMarkdown();
+    toast(
+      parts.length > 1
+        ? parts.length + " images added"
+        : "Image added: click it in the preview to resize",
+    );
+  }
+
+  // "w=60,a=right"  ->  { w: 60, a: "right" }
+  function parseImgMeta(t) {
+    const o = {};
+    (t || "").split(",").forEach((p) => {
+      const [k, v] = p.split("=").map((s) => (s || "").trim());
+      if (k === "w" && +v > 0) o.w = Math.min(100, Math.round(+v));
+      if (k === "a" && ["left", "center", "right"].includes(v)) o.a = v;
+    });
+    return o;
+  }
+
+  // marked renderer: img:ID -> real <img>   (marked v12 signature)
+  function renderImage(href, title, text) {
+    if (!href || !href.startsWith("img:")) return false; // normal images: default behaviour
+    const id = href.slice(4),
+      occ = imgOcc++,
+      { w, a = "center" } = parseImgMeta(title),
+      src = imageStore[id];
+    if (!src)
+      return `<span class="img-missing">Image not found in this browser (${esc(text || id)})</span>`;
+    const ml = a === "left" ? "0" : "auto",
+      mr = a === "right" ? "0" : "auto";
+    return `<img src="${src}" alt="${esc(text)}" data-img-id="${id}" data-occ="${occ}" data-align="${a}" draggable="false" style="${w ? `width:${w}%;` : ""}margin-left:${ml};margin-right:${mr}">`;
+  }
+
+  // Write a size/alignment change (or deletion) back into the Markdown source
+  function editImage(occ, patch, remove) {
+    const src = els.textarea.value;
+    const masked = src.replace(CODE_MASK_RE, (m) => " ".repeat(m.length)); // ignore code blocks
+    let n = 0;
+    for (const m of masked.matchAll(IMG_RE)) {
+      if (n++ !== occ) continue;
+      let out = "";
+      if (!remove) {
+        const orig = src
+          .slice(m.index, m.index + m[0].length)
+          .match(new RegExp(IMG_RE.source));
+        const meta = Object.assign(parseImgMeta(orig[3]), patch);
+        Object.keys(meta).forEach((k) => meta[k] == null && delete meta[k]);
+        const s = [
+          meta.w != null ? `w=${meta.w}` : "",
+          meta.a && meta.a !== "center" ? `a=${meta.a}` : "",
+        ]
+          .filter(Boolean)
+          .join(",");
+        out = `![${orig[1]}](img:${orig[2]}${s ? ` "${s}"` : ""})`;
+      }
+      els.textarea.value =
+        src.slice(0, m.index) + out + src.slice(m.index + m[0].length);
+      renderMarkdown();
+      return;
+    }
+  }
+
+  const selectedImg = () =>
+    selOcc < 0 ? null : els.body.querySelector(`img[data-occ="${selOcc}"]`);
+
+  function positionImgBox() {
+    if (!imgBox) return;
+    const img = selectedImg();
+    if (!img) {
+      imgBox.classList.add("hidden");
+      return;
+    }
+    const r = img.getBoundingClientRect(),
+      pr = els.previewPanel.getBoundingClientRect();
+    if (!r.width) {
+      imgBox.classList.add("hidden");
+      return;
+    }
+    imgBox.classList.remove("hidden");
+    imgBox.style.left = r.left - pr.left + els.previewPanel.scrollLeft + "px";
+    imgBox.style.top = r.top - pr.top + els.previewPanel.scrollTop + "px";
+    imgBox.style.width = r.width + "px";
+    imgBox.style.height = r.height + "px";
+    imgBox.classList.toggle("bar-below", r.top - pr.top < 52);
+    const bodyW = els.body.getBoundingClientRect().width || 1;
+    $("img-size-label").textContent = Math.round((r.width / bodyW) * 100) + "%";
+  }
+
+  // Called after every render: keep the selection alive across re-renders
+  function refreshImageSelection() {
+    const img = selectedImg();
+    if (!img) selOcc = -1;
+    else if (!img.complete)
+      img.addEventListener("load", positionImgBox, { once: true });
+    positionImgBox();
+  }
+
+  function buildImageBox() {
+    imgBox = document.createElement("div");
+    imgBox.id = "img-box";
+    imgBox.className = "no-print hidden";
+    imgBox.innerHTML = `
+      <div id="img-bar">
+        <button data-act="left" title="Align left"><i class="fa-solid fa-align-left"></i></button>
+        <button data-act="center" title="Center"><i class="fa-solid fa-align-center"></i></button>
+        <button data-act="right" title="Align right"><i class="fa-solid fa-align-right"></i></button>
+        <span class="sep"></span>
+        <span id="img-size-label">100%</span>
+        <button data-act="fit" title="Full width"><i class="fa-solid fa-expand"></i></button>
+        <button data-act="reset" title="Reset size"><i class="fa-solid fa-rotate-left"></i></button>
+        <span class="sep"></span>
+        <button data-act="delete" class="danger" title="Delete image (Del)"><i class="fa-solid fa-trash"></i></button>
+      </div>
+      <span class="img-handle" data-h="nw"></span><span class="img-handle" data-h="ne"></span>
+      <span class="img-handle" data-h="sw"></span><span class="img-handle" data-h="se"></span>`;
+    els.previewPanel.appendChild(imgBox);
+
+    // Toolbar actions
+    imgBox.querySelector("#img-bar").addEventListener("click", (e) => {
+      const b = e.target.closest("[data-act]");
+      if (!b || selOcc < 0) return;
+      const act = b.dataset.act;
+      if (act === "delete") {
+        editImage(selOcc, null, true);
+        selOcc = -1;
+      } else if (act === "fit") editImage(selOcc, { w: 100 });
+      else if (act === "reset") editImage(selOcc, { w: null, a: null });
+      else editImage(selOcc, { a: act });
+    });
+
+    // Drag handles
+    imgBox.querySelectorAll(".img-handle").forEach((h) => {
+      h.addEventListener("pointerdown", (e) => {
+        const img = selectedImg();
+        if (!img) return;
+        e.preventDefault();
+        e.stopPropagation();
+        h.setPointerCapture(e.pointerId);
+        const align = img.dataset.align || "center",
+          isWest = h.dataset.h.includes("w"),
+          startX = e.clientX,
+          startW = img.getBoundingClientRect().width,
+          bodyW = els.body.getBoundingClientRect().width,
+          // centered images grow on both sides, so the edge moves half as fast as the cursor
+          factor = align === "center" ? 2 : 1,
+          // right-aligned images are anchored on the right edge
+          dir = isWest ? -1 : align === "right" ? -1 : 1;
+        let pct = (startW / bodyW) * 100;
+        const move = (ev) => {
+          const w = startW + dir * (ev.clientX - startX) * factor;
+          pct = Math.min(100, Math.max(5, (w / bodyW) * 100));
+          img.style.width = pct + "%";
+          positionImgBox();
+        };
+        const up = () => {
+          h.removeEventListener("pointermove", move);
+          h.removeEventListener("pointerup", up);
+          h.removeEventListener("pointercancel", up);
+          editImage(selOcc, { w: Math.round(pct) });
+        };
+        h.addEventListener("pointermove", move);
+        h.addEventListener("pointerup", up);
+        h.addEventListener("pointercancel", up);
+      });
+    });
+
+    // Select / deselect
+    els.previewPanel.addEventListener("click", (e) => {
+      if (imgBox.contains(e.target)) return;
+      const img = e.target.closest && e.target.closest("img[data-img-id]");
+      selOcc = img ? +img.dataset.occ : -1;
+      positionImgBox();
+    });
+
+    document.addEventListener("keydown", (e) => {
+      const t = e.target.tagName;
+      if (selOcc < 0 || t === "INPUT" || t === "TEXTAREA" || t === "SELECT")
+        return;
+      if (e.key === "Escape") {
+        selOcc = -1;
+        positionImgBox();
+      } else if (e.key === "Delete" || e.key === "Backspace") {
+        e.preventDefault();
+        editImage(selOcc, null, true);
+        selOcc = -1;
+      }
+    });
+
+    // Layout changes (width slider, window resize, sidebars) keep the box aligned
+    new ResizeObserver(positionImgBox).observe(els.paper);
+
+    // Paste screenshots / copied images (like MS Word)
+    document.addEventListener("paste", (e) => {
+      const t = e.target.tagName;
+      if (t === "INPUT" || t === "SELECT") return;
+      const cd = e.clipboardData;
+      if (!cd) return;
+      const files = [...cd.items]
+        .filter((i) => i.kind === "file" && i.type.startsWith("image/"))
+        .map((i) => i.getAsFile())
+        .filter(Boolean);
+      if (!files.length) return;
+      if (cd.getData("text/plain").trim()) return; // real text on the clipboard: normal paste
+      e.preventDefault();
+      insertImages(files);
+    });
+  }
+
   // ---------- FILE HELPERS ----------
   function loadMarkdownText(text, name) {
-    els.textarea.value = text;
+    els.textarea.value = migrateInlineImages(text);
     if (name) {
       state.title = name.replace(/\.[^/.]+$/, "");
       els.title.value = state.title;
@@ -730,20 +1075,14 @@ export class IngestionEngine {
   function loadFile(file) {
     if (!file) return;
     const reader = new FileReader();
-    if (file.type.startsWith("image/")) {
-      reader.onload = (e) =>
-        insertAtCursor(`\n![${file.name}](${e.target.result})\n`);
-      reader.readAsDataURL(file);
-    } else {
-      reader.onload = (e) =>
-        loadMarkdownText(String(e.target.result), file.name);
-      reader.readAsText(file);
-    }
+    reader.onload = (e) => loadMarkdownText(String(e.target.result), file.name);
+    reader.readAsText(file);
   }
-  function insertAtCursor(text) {
-    const ta = els.textarea;
-    ta.setRangeText(text, ta.selectionStart, ta.selectionEnd, "end");
-    renderMarkdown();
+  function loadFiles(files) {
+    const other = files.find((f) => !f.type.startsWith("image/"));
+    if (other) return loadFile(other); // a .md file replaces the document
+    const imgs = files.filter((f) => f.type.startsWith("image/"));
+    if (imgs.length) insertImages(imgs);
   }
 
   // ---------- PDF (client-side) ----------
@@ -930,12 +1269,14 @@ export class IngestionEngine {
     // Files
     $("btn-import-md").onclick = () => $("file-input-md").click();
     $("file-input-md").onchange = (e) => {
-      loadFile(e.target.files[0]);
+      const f = Array.from(e.target.files);
       e.target.value = "";
+      loadFiles(f);
     };
     $("image-upload-input").onchange = (e) => {
-      loadFile(e.target.files[0]);
+      const f = Array.from(e.target.files);
       e.target.value = "";
+      loadFiles(f);
     };
     $("btn-new-doc").onclick = () => {
       if (confirm("Start a new document? Unsaved changes will be lost."))
@@ -965,7 +1306,7 @@ export class IngestionEngine {
     els.editorPanel.addEventListener("drop", (e) => {
       e.preventDefault();
       els.dropOverlay.classList.add("hidden");
-      loadFile(e.dataTransfer.files[0]);
+      loadFiles(Array.from(e.dataTransfer.files));
     });
 
     // Export
@@ -1004,12 +1345,19 @@ export class IngestionEngine {
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     };
+
+    // Image selection box, resize handles, paste support
+    buildImageBox();
   }
 
   // ---------- INIT ----------
   function init() {
-    if (typeof marked !== "undefined")
+    if (typeof marked !== "undefined") {
       marked.setOptions({ gfm: true, breaks: true });
+      marked.use({ renderer: { image: renderImage } });
+    }
+    state.markdown = migrateInlineImages(state.markdown);
+    pruneImages(state.markdown);
     els.textarea.value = state.markdown;
     els.title.value = state.title;
     syncControls();
